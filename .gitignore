@@ -1,0 +1,14 @@
+.DS_Store
+*.zip
+
+# config files
+*.toml
+*.yaml
+.env
+
+
+# folders
+__pycache__/
+deployment_package/
+events/
+lambda-test-env/
