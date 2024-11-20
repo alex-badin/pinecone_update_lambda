@@ -1,10 +1,10 @@
 import asyncio
-from lambda_function import lambda_handler
+from lambda_function import async_handler
 
 async def test_lambda():
-    event = {}
-    context = {}
-    result = await lambda_handler(event, context)
+    event = {}  # You can add test event data here if needed
+    context = {}  # You can create a mock context object if needed
+    result = await async_handler(event, context)
     print(result)
 
 if __name__ == "__main__":

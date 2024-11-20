@@ -1,19 +1,15 @@
 print('start pinecone update lambda')
+
 import os
 import asyncio
 import random
 import json
 import uuid
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+from datetime import datetime, timedelta, timezone
 import time
-
-# Load environment variables from .env file
-load_dotenv()
 
 import boto3
 from botocore.exceptions import ClientError
-import pandas as pd
 from pyairtable import Api
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -77,17 +73,21 @@ async def get_new_messages(channel, last_id, start_date):
                               system_version="4.16.30-vxCUSTOM") as client:
         data = []
         try:
-            offset_id = int(last_id) if last_id else 0
+            offset_id = int(last_id) if last_id else 0  # Use None instead of 0
         except ValueError:
             offset_id = 0
         
-        async for message in client.iter_messages(channel, reverse=True,
-                                                  offset_id=offset_id,
-                                                  offset_date=start_date):
+        # Make start_date timezone-aware
+        start_date = start_date.replace(tzinfo=timezone.utc)
+        print(f"Parsing channel: {channel}, start date: {start_date}, last id: {last_id}, offset id: {offset_id}")
+        async for message in client.iter_messages(channel, reverse=True, offset_id=offset_id):
+            # print(f"Message date: {message.date}, message id: {message.id}")
+            if message.date < start_date:
+                continue
             data.append(message.to_dict())
 
     print(f"Channel: {channel}, N of new messages: {len(data)}")
-    return pd.DataFrame(data) if data else None
+    return data
 
 def clean_text(text):
     # Unicode range for emojis
@@ -123,41 +123,70 @@ def summarize(text, language="russian", sentences_count=2):
     summary = summarizer(parser.document, sentences_count)
     return ' '.join([str(sentence) for sentence in summary])
 
-def process_new_messages(df, channel, stance):
-    # add channel name & stance
-    df.loc[:, 'channel'] = channel
-    df.loc[:, 'stance'] = stance
-    df.loc[:, 'cleaned_message'] = df['message'].apply(clean_text) #remove emojis, urls, foreign agent text
-    df.drop_duplicates(subset=['id'], inplace = True) # remove duplicates
-    df = df[~df.cleaned_message.str.len().between(0, 30)].copy() #remove empty or too short messages
-    # summarize cleaned_messages: 3 sentences if length > 750, 4 sentences if length > 1500
-    df.loc[:, 'summary'] = df['cleaned_message'].apply(lambda x: summarize(x, sentences_count=3) if len(x) > 750 else summarize(x, sentences_count=4) if len(x) > 500 else x)
-    return df
+def process_new_messages(messages, channel, stance):
+    processed_messages = []
+    empty_message_count = 0  # Counter for empty messages
+    for message in messages:
+        if 'message' not in message:
+            empty_message_count += 1
+            continue
+        cleaned_message = clean_text(message['message'])
+        if len(cleaned_message) > 30:
+            summary = summarize(cleaned_message, sentences_count=3 if len(cleaned_message) > 750 else 4 if len(cleaned_message) > 500 else 2)
+            processed_messages.append({
+                'id': message['id'],
+                'channel': channel,
+                'stance': stance,
+                'cleaned_message': cleaned_message,
+                'summary': summary,
+                'date': message['date'],
+                'views': message.get('views', 0)  # Use get() with a default value
+            })
+    if empty_message_count > 0:
+        print(f"Number of empty messages: {empty_message_count}")
+    return processed_messages
 
-def get_embeddings_df(df, text_col='summary', model="embed-multilingual-v3.0"):
-    df['embeddings'] = co.embed(texts=df[text_col].tolist(), model=model, input_type="clustering").embeddings
-    return df
+@retry(stop=stop_after_attempt(3), wait=wait_random_exponential(min=1, max=60))
+def get_embeddings_with_retry(texts, model="embed-multilingual-v3.0"):
+    print(f"Getting embeddings for {len(texts)} texts")
+    return co.embed(texts=texts, model=model, input_type="clustering").embeddings
 
-@retry(stop=stop_after_attempt(4), wait=wait_random_exponential(multiplier=1, max=10))
-def upsert_to_pinecone(df, index, batch_size=100):
-    # create df for pinecone
-    meta_col = ['cleaned_message', 'summary', 'stance', 'channel', 'date', 'views']
-    #rename embeddings to values
-    df4pinecone = df[meta_col+['id', 'embeddings']].copy()
-    df4pinecone = df4pinecone.rename(columns={'embeddings': 'values'})
-    # convert date to integer (as pinecone doesn't support datetime)
-    df4pinecone['date'] = df4pinecone['date'].apply(lambda x: int(time.mktime(x.timetuple())))
-    # id as channel_id + message_id (to avoid duplication and easier identification)
-    df4pinecone['id'] = df4pinecone['channel'] + '_' + df4pinecone['id'].astype(str)
-    # convert to pinecone format
-    df4pinecone['metadata'] = df4pinecone[meta_col].to_dict('records')
-    df4pinecone = df4pinecone[['id', 'values', 'metadata']]
-    if df4pinecone.empty:
-        print("DataFrame is empty. No records to upsert.")
-        return
-    for i in range(0, df4pinecone.shape[0], batch_size):
-        index.upsert(vectors=df4pinecone.iloc[i:i+batch_size].to_dict('records'))
-    print(f"Upserted {df4pinecone.shape[0]} records. Last id: {df4pinecone.iloc[-1]['id']}")
+def get_embeddings(messages, text_col='summary', model="embed-multilingual-v3.0"):
+    texts = [msg[text_col] for msg in messages if text_col in msg]
+    if not texts:
+        print(f"Warning: No '{text_col}' found in messages. Available keys: {messages[0].keys() if messages else 'No messages'}")
+        return messages
+    try:
+        embeddings = get_embeddings_with_retry(texts, model)
+        for msg, embedding in zip(messages, embeddings):
+            msg['embeddings'] = embedding
+    except Exception as e:
+        print(f"Error getting embeddings: {str(e)}")
+        # Return messages without embeddings if there's an error
+        return messages
+    return messages
+
+def upsert_to_pinecone(messages, index, batch_size=100):
+    vectors = []
+    for msg in messages:
+        vector = {
+            'id': f"{msg['channel']}_{msg['id']}",
+            'values': msg['embeddings'],
+            'metadata': {
+                'cleaned_message': msg['cleaned_message'],
+                'summary': msg['summary'],
+                'stance': msg['stance'],
+                'channel': msg['channel'],
+                'date': int(time.mktime(msg['date'].timetuple())),
+                'views': msg['views']
+            }
+        }
+        vectors.append(vector)
+    
+    for i in range(0, len(vectors), batch_size):
+        batch = vectors[i:i+batch_size]
+        index.upsert(vectors=batch)
+    print(f"Upserted {len(vectors)} records. Last id: {vectors[-1]['id']}")
 
 def update_airtable_last_id(table, channel, last_id):
     matching_records = table.all(formula=f"{{channel_name}}='{channel}'")
@@ -170,7 +199,7 @@ def update_airtable_last_id(table, channel, last_id):
 def log_summary_to_airtable(parsed_channels, missed_channels, new_channels):
     execution_date = datetime.now()
     primary_key = f"{execution_date.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    
+
     summary = {
         'id': primary_key,
         'execution_date': execution_date.isoformat(),
@@ -186,37 +215,48 @@ def log_summary_to_airtable(parsed_channels, missed_channels, new_channels):
     print(f"Execution summary logged with ID: {primary_key}")
 
 async def main():
-    start_date = datetime.now() - timedelta(days=4)
+    start_date = datetime.now(timezone.utc) - timedelta(days=4)
+    print(f"Start date for messages: {start_date}")
     parsed_channels = []
     missed_channels = []
     new_channels = []
 
     records = table.all()
-    df_channels = pd.DataFrame([record['fields'] for record in records])
-    df_channels = df_channels[df_channels['status'] == 'Active']
+    df_channels = [record['fields'] for record in records]
+    df_channels = [record for record in df_channels if record['status'] == 'Active']
 
-    channels = df_channels[['channel_name', 'last_id', 'stance']].values.tolist()
+    channels = [(record['channel_name'], record['last_id'], record['stance']) for record in df_channels]
     random.shuffle(channels)
 
+    print(f"Channels to parse: {len(channels)}: {channels}")
+    print(f"Start date for messages: {start_date}")
     for channel, last_id, stance in channels:
         try:
-            df = await get_new_messages(channel, last_id, start_date)
-            if df is None or df.empty:
+            messages = await get_new_messages(channel, last_id, start_date)
+            if not messages:
+                print(f"No new messages for channel: {channel}")
                 continue
 
-            df = process_new_messages(df, channel, stance)
-            df = get_embeddings_df(df, text_col='message', model="embed-multilingual-v3.0")
+            processed_messages = process_new_messages(messages, channel, stance)
+            if not processed_messages:
+                print(f"No processed messages for channel: {channel}")
+                continue
 
-            upsert_to_pinecone(df, pine_index)
+            messages_with_embeddings = get_embeddings(processed_messages, text_col='cleaned_message', model="embed-multilingual-v3.0")
 
-            new_last_id = df['id'].max()
-            update_airtable_last_id(table, channel, new_last_id)
+            if messages_with_embeddings:
+                upsert_to_pinecone(messages_with_embeddings, pine_index)
 
-            parsed_channels.append(channel)
-            if not last_id:
-                new_channels.append(channel)
+                new_last_id = max(msg['id'] for msg in messages_with_embeddings)
+                update_airtable_last_id(table, channel, new_last_id)
 
-            print(f"Successfully processed channel: {channel}")
+                parsed_channels.append(channel)
+                if not last_id:
+                    new_channels.append(channel)
+
+                print(f"Successfully processed channel: {channel}")
+            else:
+                print(f"No messages with embeddings for channel: {channel}")
 
         except Exception as e:
             print(f"Error processing channel {channel}: {str(e)}")
@@ -228,7 +268,7 @@ async def main():
 
     log_summary_to_airtable(parsed_channels, missed_channels, new_channels)
 
-async def lambda_handler(event, context):
+async def async_handler(event, context):
     try:
         await main()
         return {
@@ -241,5 +281,8 @@ async def lambda_handler(event, context):
             'statusCode': 500,
             'body': f'Error updating Pinecone database: {str(e)}'
         }
+    finally:
+        print('end pinecone update lambda')
 
-print('end pinecone update lambda')
+def lambda_handler(event, context):
+    return asyncio.get_event_loop().run_until_complete(async_handler(event, context))
