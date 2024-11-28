@@ -44,9 +44,9 @@ def get_secret(secret_name):
 # Retrieve secrets
 try:
     secrets = get_secret(os.environ['SECRET_NAME'])
-    API_ID = secrets['api_id']
-    API_HASH = secrets['api_hash']
-    SESSION_STRING = secrets['session_string']
+    TG_API_ID = secrets['tg_api_id']
+    TG_API_HASH = secrets['tg_api_hash']
+    TG_SESSION_STRING = secrets['tg_session_string']
     COHERE_KEY = secrets['cohere_key']
     PINE_KEY = secrets['pine_key']
     AIRTABLE_API_TOKEN = secrets['airtable_api_token']
@@ -69,7 +69,7 @@ table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 log_table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_LOG_TABLE)
 
 async def get_new_messages(channel, last_id, start_date):
-    async with TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH,
+    async with TelegramClient(StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH,
                               system_version="4.16.30-vxCUSTOM") as client:
         data = []
         try:

@@ -1,0 +1,1 @@
+{"errorMessage": "Unable to import module 'lambda_function': /var/task/tokenizers/tokenizers.abi3.so: invalid ELF header", "errorType": "Runtime.ImportModuleError", "requestId": "", "stackTrace": []}

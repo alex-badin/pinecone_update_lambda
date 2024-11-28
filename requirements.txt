@@ -5,3 +5,4 @@ pyairtable==2.3.3
 sumy==0.11.0
 telethon==1.36.0
 tenacity==8.5.0
+tokenizers==0.15.2 ; platform_machine == 'x86_64'
