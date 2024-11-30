@@ -15,9 +15,6 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 import cohere
 from pinecone import Pinecone
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.lsa import LsaSummarizer
 import re
 import unicodedata
 from tenacity import (
@@ -25,6 +22,7 @@ from tenacity import (
     stop_after_attempt,
     wait_random_exponential,
 )  # for exponential backoff
+from src.summarizer import Summarizer
 
 # Initialize AWS clients
 secrets_manager = boto3.client('secretsmanager', region_name=os.environ.get('AWS_REGION', 'eu-central-1'))
@@ -50,6 +48,7 @@ try:
     COHERE_KEY = secrets['cohere_key']
     PINE_KEY = secrets['pine_key']
     AIRTABLE_API_TOKEN = secrets['airtable_api_token']
+    GEMINI_API_KEY = secrets['gemini_api_key']
 except Exception as e:
     print(f"Error retrieving secrets: {str(e)}")
     raise
@@ -67,6 +66,9 @@ pine_index = pc.Index(PINE_INDEX)
 airtable_api = Api(AIRTABLE_API_TOKEN)
 table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 log_table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_LOG_TABLE)
+
+# Initialize summarizer with other clients
+summarizer = Summarizer(GEMINI_API_KEY)
 
 async def get_new_messages(channel, last_id, start_date):
     async with TelegramClient(StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH,
@@ -117,12 +119,6 @@ def clean_text(text):
 
     return text
 
-def summarize(text, language="russian", sentences_count=2):
-    parser = PlaintextParser.from_string(text, Tokenizer(language))
-    summarizer = LsaSummarizer()
-    summary = summarizer(parser.document, sentences_count)
-    return ' '.join([str(sentence) for sentence in summary])
-
 def process_new_messages(messages, channel, stance):
     processed_messages = []
     empty_message_count = 0  # Counter for empty messages
@@ -132,7 +128,8 @@ def process_new_messages(messages, channel, stance):
             continue
         cleaned_message = clean_text(message['message'])
         if len(cleaned_message) > 30:
-            summary = summarize(cleaned_message, sentences_count=3 if len(cleaned_message) > 750 else 4 if len(cleaned_message) > 500 else 2)
+            sentences_count = 3 if len(cleaned_message) > 750 else 4 if len(cleaned_message) > 500 else 2
+            summary = summarizer.summarize(cleaned_message, max_sentences=sentences_count)
             processed_messages.append({
                 'id': message['id'],
                 'channel': channel,
@@ -140,7 +137,7 @@ def process_new_messages(messages, channel, stance):
                 'cleaned_message': cleaned_message,
                 'summary': summary,
                 'date': message['date'],
-                'views': message.get('views', 0)  # Use get() with a default value
+                'views': message.get('views', 0)
             })
     if empty_message_count > 0:
         print(f"Number of empty messages: {empty_message_count}")
