@@ -1,6 +1,7 @@
 print('start pinecone update lambda')
 
 import os
+from dotenv import load_dotenv
 import asyncio
 import random
 import json
@@ -24,11 +25,10 @@ from tenacity import (
 )  # for exponential backoff
 from src.summarizer import Summarizer
 
-# Initialize AWS clients
-secrets_manager = boto3.client('secretsmanager', region_name=os.environ.get('AWS_REGION', 'eu-central-1'))
-
 # Function to retrieve secrets
 def get_secret(secret_name):
+    # Initialize AWS clients
+    secrets_manager = boto3.client('secretsmanager', region_name=os.environ.get('AWS_REGION', 'eu-central-1'))
     try:
         get_secret_value_response = secrets_manager.get_secret_value(SecretId=secret_name)
     except ClientError as e:
@@ -41,14 +41,40 @@ def get_secret(secret_name):
 
 # Retrieve secrets
 try:
-    secrets = get_secret(os.environ['SECRET_NAME'])
-    TG_API_ID = secrets['tg_api_id']
-    TG_API_HASH = secrets['tg_api_hash']
-    TG_SESSION_STRING = secrets['tg_session_string']
-    COHERE_KEY = secrets['cohere_key']
-    PINE_KEY = secrets['pine_key']
-    AIRTABLE_API_TOKEN = secrets['airtable_api_token']
-    GEMINI_API_KEY = secrets['gemini_api_key']
+    # secrets = get_secret(os.environ['SECRET_NAME'])
+    # TG_API_ID = secrets['tg_api_id']
+    # TG_API_HASH = secrets['tg_api_hash']
+    # TG_SESSION_STRING = secrets['tg_session_string']
+    # COHERE_KEY = secrets['cohere_key']
+    # PINE_KEY = secrets['pine_key']
+    # AIRTABLE_API_TOKEN = secrets['airtable_api_token']
+    # GEMINI_API_KEY = secrets['gemini_api_key']
+
+    # Load environment variables
+    load_dotenv()
+    TG_API_ID = os.getenv('TG_API_ID')
+    TG_API_HASH = os.getenv('TG_API_HASH')
+    TG_SESSION_STRING = os.getenv('TG_SESSION_STRING')
+    COHERE_KEY = os.getenv('COHERE_KEY')
+    PINE_KEY = os.getenv('PINE_KEY')
+    AIRTABLE_API_TOKEN = os.getenv('AIRTABLE_API_TOKEN')
+    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+
+    # Verify all required variables are present
+    required_vars = {
+    "TG_API_ID": os.getenv("TG_API_ID"),
+    "TG_API_HASH": os.getenv("TG_API_HASH"),
+    "TG_SESSION_STRING": os.getenv("TG_SESSION_STRING"),
+    "COHERE_KEY": os.getenv("COHERE_KEY"),
+    "PINE_KEY": os.getenv("PINE_KEY"),
+    "AIRTABLE_API_TOKEN": os.getenv("AIRTABLE_API_TOKEN"),
+    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
+    }
+
+    missing = [var_name for var_name, value in required_vars.items() if not value]
+
+    if missing:
+        raise ValueError(f"Missing environment variables: {', '.join(missing)}")
 except Exception as e:
     print(f"Error retrieving secrets: {str(e)}")
     raise
@@ -82,6 +108,7 @@ async def get_new_messages(channel, last_id, start_date):
         # Make start_date timezone-aware
         start_date = start_date.replace(tzinfo=timezone.utc)
         print(f"Parsing channel: {channel}, start date: {start_date}, last id: {last_id}, offset id: {offset_id}")
+        # we start from the offset_id message, but store only messages after start_date
         async for message in client.iter_messages(channel, reverse=True, offset_id=offset_id):
             # print(f"Message date: {message.date}, message id: {message.id}")
             if message.date < start_date:
@@ -128,8 +155,7 @@ def process_new_messages(messages, channel, stance):
             continue
         cleaned_message = clean_text(message['message'])
         if len(cleaned_message) > 30:
-            sentences_count = 3 if len(cleaned_message) > 750 else 4 if len(cleaned_message) > 500 else 2
-            summary = summarizer.summarize(cleaned_message, max_sentences=sentences_count)
+            summary, _ = summarizer.summarize(cleaned_message, max_summary_length=500, length_threshold=750)
             processed_messages.append({
                 'id': message['id'],
                 'channel': channel,
@@ -283,3 +309,8 @@ async def async_handler(event, context):
 
 def lambda_handler(event, context):
     return asyncio.get_event_loop().run_until_complete(async_handler(event, context))
+
+if __name__ == "__main__":
+    print("Starting local execution...")
+    asyncio.run(main())
+    print("Execution completed!")

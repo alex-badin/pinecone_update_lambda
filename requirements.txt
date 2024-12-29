@@ -5,3 +5,4 @@ pyairtable==2.3.3
 telethon==1.36.0
 tenacity==8.5.0
 google-generativeai==0.3.2
+python-dotenv==1.0.0

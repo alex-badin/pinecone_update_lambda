@@ -12,3 +12,5 @@ __pycache__/
 deployment_package/
 events/
 lambda-test-env/
+venv/
+tests/
