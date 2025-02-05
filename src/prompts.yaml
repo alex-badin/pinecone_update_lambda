@@ -1,0 +1,12 @@
+summarize:
+  description: "Analyzes text to detect if it's a digest, create summary, and extract NERs"
+  template: |
+    Analyze this text in {language}:
+    "{text}"
+    
+    Provide response in JSON format with these fields:
+    1. is_digest: true if text contains multiple separate news/topics, false if single topic
+    2. summary: concise summary in 2-3 sentences
+    3. named_entities: list of important named entities (people, organizations, locations)
+    
+    Response should be valid JSON only. 
