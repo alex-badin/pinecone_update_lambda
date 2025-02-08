@@ -296,56 +296,71 @@ def store_in_sqlite(messages, db_path="collected_messages.db"):
             raise
 
 async def main():
-    start_date = datetime.now(timezone.utc) - timedelta(days=4)
-    print(f"Start date for messages: {start_date}")
-    parsed_channels = []
-    missed_channels = []
-    new_channels = []
+    try:
+        start_date = datetime.now(timezone.utc) - timedelta(days=4)
+        print(f"Start date for messages: {start_date}")
+        parsed_channels = []
+        missed_channels = []
+        new_channels = []
 
-    records = table.all()
-    df_channels = [record['fields'] for record in records]
-    df_channels = [record for record in df_channels if record['status'] == 'Active']
+        records = table.all()
+        df_channels = [record['fields'] for record in records]
+        df_channels = [record for record in df_channels if record['status'] == 'Active']
 
-    channels = [(record['channel_name'], record['last_id'], record['stance']) for record in df_channels]
-    random.shuffle(channels)
+        channels = [(record['channel_name'], record['last_id'], record['stance']) for record in df_channels]
+        random.shuffle(channels)
 
-    print(f"Channels to parse: {len(channels)}: {channels}")
-    total_channels = len(channels)
-    for index, (channel, last_id, stance) in enumerate(channels, 1):
+        print(f"Channels to parse: {len(channels)}: {channels}")
+        total_channels = len(channels)
+        for index, (channel, last_id, stance) in enumerate(channels, 1):
+            try:
+                messages = await get_new_messages(channel, last_id, start_date, index, total_channels)
+                if not messages:
+                    print(f"No new messages for channel: {channel}")
+                    continue
+
+                processed_messages = process_new_messages(messages, channel, stance)
+                if not processed_messages:
+                    print(f"No processed messages for channel: {channel}")
+                    continue
+
+                messages_with_embeddings = get_embeddings(processed_messages, text_col='cleaned_message', model="embed-multilingual-v3.0")
+
+                if messages_with_embeddings:
+                    upsert_to_pinecone(messages_with_embeddings, pine_index)
+                    new_last_id = max(msg['id'] for msg in messages_with_embeddings)
+                    update_airtable_last_id(table, channel, new_last_id)
+                    parsed_channels.append(channel)
+                    if not last_id:
+                        new_channels.append(channel)
+                    print(f"Successfully processed channel: {channel}")
+
+                    # Incrementally store the collected messages in the SQLite database
+                    store_in_sqlite(messages_with_embeddings)
+                else:
+                    print(f"No messages with embeddings for channel: {channel}")
+
+            except Exception as e:
+                print(f"Error processing channel {channel}: {str(e)}")
+                import traceback
+                print(f"Traceback: {traceback.format_exc()}")
+                missed_channels.append(channel)
+
+        log_summary_to_airtable(parsed_channels, missed_channels, new_channels)
+    finally:
+        # Cleanup connections
         try:
-            messages = await get_new_messages(channel, last_id, start_date, index, total_channels)
-            if not messages:
-                print(f"No new messages for channel: {channel}")
-                continue
-
-            processed_messages = process_new_messages(messages, channel, stance)
-            if not processed_messages:
-                print(f"No processed messages for channel: {channel}")
-                continue
-
-            messages_with_embeddings = get_embeddings(processed_messages, text_col='cleaned_message', model="embed-multilingual-v3.0")
-
-            if messages_with_embeddings:
-                upsert_to_pinecone(messages_with_embeddings, pine_index)
-                new_last_id = max(msg['id'] for msg in messages_with_embeddings)
-                update_airtable_last_id(table, channel, new_last_id)
-                parsed_channels.append(channel)
-                if not last_id:
-                    new_channels.append(channel)
-                print(f"Successfully processed channel: {channel}")
-
-                # Incrementally store the collected messages in the SQLite database
-                store_in_sqlite(messages_with_embeddings)
-            else:
-                print(f"No messages with embeddings for channel: {channel}")
-
-        except Exception as e:
-            print(f"Error processing channel {channel}: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-            missed_channels.append(channel)
-
-    log_summary_to_airtable(parsed_channels, missed_channels, new_channels)
+            co.close()  # Close Cohere client if it has a close method
+        except:
+            pass
+        
+        try:
+            pc.close()  # Close Pinecone client if it has a close method
+        except:
+            pass
+        
+        # Allow time for gRPC connections to close gracefully
+        await asyncio.sleep(1)
 
 async def async_handler(event, context):
     try:
@@ -369,4 +384,6 @@ def lambda_handler(event, context):
 if __name__ == "__main__":
     print("Starting local execution...")
     asyncio.run(main())
+    # Add small delay to allow gRPC connections to close
+    time.sleep(1)
     print("Execution completed!")
