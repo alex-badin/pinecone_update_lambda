@@ -41,8 +41,15 @@ def get_secret(secret_name):
             return json.loads(get_secret_value_response['SecretBinary'])
 
 # Load environment variables
+# Modify the load_dotenv() call to use absolute path
 try:
-    load_dotenv()
+    # Get the directory where the script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Construct absolute path to .env file
+    env_path = os.path.join(script_dir, '.env')
+    # Load environment variables with explicit path
+    load_dotenv(env_path)
+    
     TG_API_ID = os.getenv('TG_API_ID')
     TG_API_HASH = os.getenv('TG_API_HASH')
     TG_SESSION_STRING = os.getenv('TG_SESSION_STRING')
