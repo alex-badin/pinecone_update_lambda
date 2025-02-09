@@ -9,6 +9,30 @@ import uuid
 from datetime import datetime, timedelta, timezone
 import time
 import sqlite3
+import logging
+from logging.handlers import RotatingFileHandler
+
+# Set up logging configuration
+log_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+os.makedirs(log_directory, exist_ok=True)
+log_file = os.path.join(log_directory, 'pinecone_update.log')
+
+# Configure logging
+logger = logging.getLogger('PineconeUpdate')
+logger.setLevel(logging.INFO)
+
+# Create handlers
+file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)  # 10MB per file, keep 5 backup files
+console_handler = logging.StreamHandler()
+
+# Create formatters and add it to handlers
+log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(log_format)
+console_handler.setFormatter(log_format)
+
+# Add handlers to the logger
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 import boto3
 from botocore.exceptions import ClientError
@@ -33,6 +57,7 @@ def get_secret(secret_name):
     try:
         get_secret_value_response = secrets_manager.get_secret_value(SecretId=secret_name)
     except ClientError as e:
+        logger.error(f"Error retrieving secret {secret_name}: {str(e)}")
         raise e
     else:
         if 'SecretString' in get_secret_value_response:
@@ -100,14 +125,13 @@ async def get_new_messages(channel, last_id, start_date, channel_index, total_ch
         except ValueError:
             offset_id = 0
         
-        # Make start_date timezone-aware
         start_date = start_date.replace(tzinfo=timezone.utc)
-        print(f"Parsing channel (#{channel_index} of {total_channels}): {channel}, start date: {start_date}, last id: {last_id}, offset id: {offset_id}")
+        logger.info(f"Parsing channel (#{channel_index} of {total_channels}): {channel}, start date: {start_date}, last id: {last_id}, offset id: {offset_id}")
         async for message in client.iter_messages(channel, reverse=True, offset_id=offset_id):
             if message.date < start_date:
                 continue
             data.append(message.to_dict())
-    print(f"Channel: {channel}, number of new messages: {len(data)}")
+    logger.info(f"Channel: {channel}, number of new messages: {len(data)}")
     return data
 
 def clean_text(text):
@@ -305,7 +329,8 @@ def store_in_sqlite(messages, db_path="collected_messages.db"):
 async def main():
     try:
         start_date = datetime.now(timezone.utc) - timedelta(days=4)
-        print(f"Start date for messages: {start_date}")
+        logger.info(f"Starting main execution with start date: {start_date}")
+        
         parsed_channels = []
         missed_channels = []
         new_channels = []
@@ -317,8 +342,9 @@ async def main():
         channels = [(record['channel_name'], record['last_id'], record['stance']) for record in df_channels]
         random.shuffle(channels)
 
+        logger.info(f"Processing {len(channels)} channels: {channels}")
         print(f"Channels to parse: {len(channels)}: {channels}")
-        total_channels = len(channels)
+
         for index, (channel, last_id, stance) in enumerate(channels, 1):
             try:
                 messages = await get_new_messages(channel, last_id, start_date, index, total_channels)
@@ -389,8 +415,8 @@ def lambda_handler(event, context):
     return asyncio.get_event_loop().run_until_complete(async_handler(event, context))
 
 if __name__ == "__main__":
-    print("Starting local execution...")
+    logger.info("Starting local execution...")
     asyncio.run(main())
     # Add small delay to allow gRPC connections to close
     time.sleep(1)
-    print("Execution completed!")
+    logger.info("Execution completed!")
