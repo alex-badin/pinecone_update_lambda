@@ -12,6 +12,7 @@ import time
 import sqlite3
 import logging
 from logging.handlers import RotatingFileHandler
+from contextlib import contextmanager
 
 # Set up logging configuration
 try:
