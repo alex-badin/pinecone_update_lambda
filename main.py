@@ -363,6 +363,7 @@ async def main():
 
         channels = [(record['channel_name'], record['last_id'], record['stance']) for record in df_channels]
         random.shuffle(channels)
+        total_channels = len(channels)  # <-- Added line
 
         logger.info(f"Processing {len(channels)} channels: {channels}")
         print(f"Channels to parse: {len(channels)}: {channels}")
