@@ -13,26 +13,46 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 # Set up logging configuration
-log_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
-os.makedirs(log_directory, exist_ok=True)
-log_file = os.path.join(log_directory, 'pinecone_update.log')
+try:
+    print('Setting up logging...')
+    # Get absolute path for the log directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_directory = os.path.join(script_dir, 'logs')
+    os.makedirs(log_directory, exist_ok=True)
+    log_file = os.path.join(log_directory, 'pinecone_update.log')
+    
+    # Add immediate file logging for debugging
+    with open(os.path.join(log_directory, 'startup_debug.log'), 'a') as f:
+        f.write(f'\n--- New execution at {datetime.now()} ---\n')
+        f.write(f'Script directory: {script_dir}\n')
+        f.write(f'Python executable: {sys.executable}\n')
+        f.write(f'Working directory: {os.getcwd()}\n')
 
-# Configure logging
-logger = logging.getLogger('PineconeUpdate')
-logger.setLevel(logging.INFO)
+    # Configure logging
+    logger = logging.getLogger('PineconeUpdate')
+    logger.setLevel(logging.DEBUG)  # Temporarily set to DEBUG level
 
-# Create handlers
-file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)  # 10MB per file, keep 5 backup files
-console_handler = logging.StreamHandler()
+    # Create handlers
+    file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
+    console_handler = logging.StreamHandler()
 
-# Create formatters and add it to handlers
-log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(log_format)
-console_handler.setFormatter(log_format)
+    # Create formatters and add it to handlers
+    log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(log_format)
+    console_handler.setFormatter(log_format)
 
-# Add handlers to the logger
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
+    # Add handlers to the logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    logger.info('Logging setup completed')
+    
+except Exception as e:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crash_log.txt'), 'a') as f:
+        f.write(f'\n--- Error at {datetime.now()} ---\n')
+        f.write(f'Error: {str(e)}\n')
+        f.write(f'Traceback: {traceback.format_exc()}\n')
+    raise
 
 import boto3
 from botocore.exceptions import ClientError
