@@ -120,7 +120,7 @@ try:
     if missing:
         raise ValueError(f"Missing environment variables: {', '.join(missing)}")
 except Exception as e:
-    print(f"Error retrieving secrets: {str(e)}")
+    logger.error(f"Error retrieving secrets: {str(e)}")
     raise
 
 # Environment variables for Pinecone
@@ -196,25 +196,25 @@ def process_new_messages(messages, channel, stance):
                 'views': message.get('views', 0)
             })
     if empty_message_count > 0:
-        print(f"Number of empty messages skipped: {empty_message_count}")
+        logger.warning(f"Number of empty messages skipped for channel {channel}: {empty_message_count}")
     return processed_messages
 
 @retry(stop=stop_after_attempt(3), wait=wait_random_exponential(min=1, max=60))
 def get_embeddings_with_retry(texts, model="embed-multilingual-v3.0"):
-    print(f"Getting embeddings for {len(texts)} texts")
+    logger.info(f"Getting embeddings for {len(texts)} texts")
     return co.embed(texts=texts, model=model, input_type="clustering").embeddings
 
 def get_embeddings(messages, text_col='cleaned_message', model="embed-multilingual-v3.0"):
     texts = [msg[text_col] for msg in messages if text_col in msg]
     if not texts:
-        print(f"Warning: No '{text_col}' found in messages. Available keys: {messages[0].keys() if messages else 'No messages'}")
+        logger.warning(f"No '{text_col}' found in messages. Available keys: {messages[0].keys() if messages else 'No messages'}")  
         return messages
     try:
         embeddings = get_embeddings_with_retry(texts, model)
         for msg, embedding in zip(messages, embeddings):
             msg['embeddings'] = embedding
     except Exception as e:
-        print(f"Error getting embeddings: {str(e)}")
+        logger.error(f"Error getting embeddings: {str(e)}")
         return messages
     return messages
 
@@ -238,7 +238,7 @@ def upsert_to_pinecone(messages, index, batch_size=100):
     for i in range(0, len(vectors), batch_size):
         batch = vectors[i:i+batch_size]
         index.upsert(vectors=batch)
-    print(f"Upserted {len(vectors)} records to Pinecone. Last id: {vectors[-1]['id']}")
+    logger.info(f"Upserted {len(vectors)} records to Pinecone. Last id: {vectors[-1]['id']}")
 
 def log_summary_to_db(parsed_channels, missed_channels, new_channels):
     execution_date = datetime.now()
@@ -279,7 +279,7 @@ def get_db_connection(db_path, max_attempts=3):
             attempt += 1
             if attempt == max_attempts:
                 raise
-            print(f"Database locked, retrying... (attempt {attempt}/{max_attempts})")
+            logger.warning(f"Database locked, retrying... (attempt {attempt}/{max_attempts})")
             time.sleep(1)  # Wait before retrying
         finally:
             try:
@@ -364,13 +364,14 @@ def store_in_sqlite(messages):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', to_insert)
             conn.commit()
-            print(f"Stored {len(to_insert)} messages in SQLite database at {MESSAGES_DB}")
+            logger.info(f"Stored {len(to_insert)} messages in SQLite database at {MESSAGES_DB}")
         except Exception as e:
-            print("Error storing messages in SQLite:", str(e))
+            logger.error(f"Error storing messages in SQLite: {str(e)}")
             raise
 
 def get_active_channels():
     """Retrieve active channels from SQLite."""
+    logger.info("Retrieving active channels from SQLite...")
     with get_db_connection(CHANNELS_DB) as conn:
         c = conn.cursor()
         c.execute("SELECT channel_name, last_id, stance FROM channels WHERE status = 'Active'")
@@ -402,18 +403,17 @@ async def main():
         total_channels = len(channels)
 
         logger.info(f"Processing {len(channels)} channels: {channels}")
-        print(f"Channels to parse: {len(channels)}: {channels}")
 
         for index, (channel, last_id, stance) in enumerate(channels, 1):
             try:
                 messages = await get_new_messages(channel, last_id, start_date, index, total_channels)
                 if not messages:
-                    print(f"No new messages for channel: {channel}")
+                    logger.info(f"No new messages for channel: {channel}")
                     continue
 
                 processed_messages = process_new_messages(messages, channel, stance)
                 if not processed_messages:
-                    print(f"No processed messages for channel: {channel}")
+                    logger.warning(f"No processed messages for channel: {channel}")
                     continue
 
                 messages_with_embeddings = get_embeddings(processed_messages, text_col='cleaned_message', model="embed-multilingual-v3.0")
@@ -426,17 +426,17 @@ async def main():
                     parsed_channels.append(channel)
                     if not last_id:
                         new_channels.append(channel)
-                    print(f"Successfully processed channel: {channel}")
+                    logger.info(f"Successfully processed channel: {channel}")
 
                     # Incrementally store the collected messages in the SQLite database
                     store_in_sqlite(messages_with_embeddings)
                 else:
-                    print(f"No messages with embeddings for channel: {channel}")
+                    logger.warning(f"No messages with embeddings for channel: {channel}")
 
             except Exception as e:
-                print(f"Error processing channel {channel}: {str(e)}")
+                logger.error(f"Error processing channel {channel}: {str(e)}")
                 import traceback
-                print(f"Traceback: {traceback.format_exc()}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 missed_channels.append(channel)
         
         # With this:
