@@ -1,7 +1,8 @@
-print('start pinecone update lambda')
+print('start pinecone update')
 
 import os
 import sys
+import traceback
 from dotenv import load_dotenv
 import asyncio
 import random
@@ -13,6 +14,10 @@ import sqlite3
 import logging
 from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
+
+# At the top of the file with other constants
+CHANNELS_DB = "channels.db"
+MESSAGES_DB = "collected_messages.db"
 
 # Set up logging configuration
 try:
@@ -58,7 +63,6 @@ except Exception as e:
 
 import boto3
 from botocore.exceptions import ClientError
-from pyairtable import Api
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 import cohere
@@ -73,7 +77,7 @@ from tenacity import (
 
 from src.summarizer import Summarizer
 
-# Function to retrieve secrets (if you use AWS Secrets Manager)
+# Function to retrieve secrets (if AWS Secrets Manager is used)
 def get_secret(secret_name):
     secrets_manager = boto3.client('secretsmanager', region_name=os.environ.get('AWS_REGION', 'eu-central-1'))
     try:
@@ -102,7 +106,6 @@ try:
     TG_SESSION_STRING = os.getenv('TG_SESSION_STRING')
     COHERE_KEY = os.getenv('COHERE_KEY')
     PINE_KEY = os.getenv('PINE_KEY')
-    AIRTABLE_API_TOKEN = os.getenv('AIRTABLE_API_TOKEN')
     GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
     
     required_vars = {
@@ -111,7 +114,6 @@ try:
         "TG_SESSION_STRING": TG_SESSION_STRING,
         "COHERE_KEY": COHERE_KEY,
         "PINE_KEY": PINE_KEY,
-        "AIRTABLE_API_TOKEN": AIRTABLE_API_TOKEN,
         "GEMINI_API_KEY": GEMINI_API_KEY,
     }
     missing = [var_name for var_name, value in required_vars.items() if not value]
@@ -121,19 +123,13 @@ except Exception as e:
     print(f"Error retrieving secrets: {str(e)}")
     raise
 
-# Environment variables for Airtable and Pinecone
+# Environment variables for Pinecone
 PINE_INDEX = os.environ['PINE_INDEX']
-AIRTABLE_BASE_ID = os.environ['AIRTABLE_BASE_ID']
-AIRTABLE_TABLE_NAME = os.environ['AIRTABLE_TABLE_NAME']
-AIRTABLE_LOG_TABLE = os.environ['AIRTABLE_LOG_TABLE']
 
 # Initialize clients
 co = cohere.Client(COHERE_KEY)
 pc = Pinecone(PINE_KEY)
 pine_index = pc.Index(PINE_INDEX)
-airtable_api = Api(AIRTABLE_API_TOKEN)
-table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
-log_table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_LOG_TABLE)
 
 # Initialize your summarizer
 summarizer = Summarizer(GEMINI_API_KEY)
@@ -147,10 +143,10 @@ async def get_new_messages(channel, last_id, start_date, channel_index, total_ch
         except ValueError:
             offset_id = 0
         
-        start_date = start_date.replace(tzinfo=timezone.utc)
-        logger.info(f"Parsing channel (#{channel_index} of {total_channels}): {channel}, start date: {start_date}, last id: {last_id}, offset id: {offset_id}")
+        start_date = start_date.replace(tzinfo=timezone.utc) # Ensure timezone-aware
+        logger.info(f"Parsing channel (#{channel_index} of {total_channels}): {channel}, start date: {start_date}, last id: {last_id}, offset_id: {offset_id}")
         async for message in client.iter_messages(channel, reverse=True, offset_id=offset_id):
-            if message.date < start_date:
+            if message.date < start_date: #for new channels with no last_id - not earlier than 4 days ago
                 continue
             data.append(message.to_dict())
     logger.info(f"Channel: {channel}, number of new messages: {len(data)}")
@@ -244,33 +240,34 @@ def upsert_to_pinecone(messages, index, batch_size=100):
         index.upsert(vectors=batch)
     print(f"Upserted {len(vectors)} records to Pinecone. Last id: {vectors[-1]['id']}")
 
-def update_airtable_last_id(table, channel, last_id):
-    matching_records = table.all(formula=f"{{channel_name}}='{channel}'")
-    if matching_records:
-        record_id = matching_records[0]['id']
-        table.update(record_id, {'last_id': int(last_id)})
-    else:
-        print(f"No matching Airtable record found for channel {channel}")
-
-def log_summary_to_airtable(parsed_channels, missed_channels, new_channels):
+def log_summary_to_db(parsed_channels, missed_channels, new_channels):
     execution_date = datetime.now()
     primary_key = f"{execution_date.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-    summary = {
-        'id': primary_key,
-        'execution_date': execution_date.isoformat(),
-        'parsed_channels_count': len(parsed_channels),
-        'parsed_channels': ', '.join(parsed_channels),
-        'missed_channels_count': len(missed_channels),
-        'missed_channels': ', '.join(missed_channels),
-        'new_channels_count': len(new_channels),
-        'new_channels': ', '.join(new_channels)
-    }
-    log_table.create(summary)
-    print(f"Execution summary logged with ID: {primary_key}")
+    
+    with get_db_connection(CHANNELS_DB) as conn:
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO execution_logs
+            (id, execution_date, parsed_channels_count, parsed_channels,
+             missed_channels_count, missed_channels,
+             new_channels_count, new_channels)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            primary_key,
+            execution_date.isoformat(),
+            len(parsed_channels),
+            ', '.join(parsed_channels),
+            len(missed_channels),
+            ', '.join(missed_channels),
+            len(new_channels),
+            ', '.join(new_channels)
+        ))
+        conn.commit()
+    logger.info(f"Execution summary logged with ID: {primary_key}")
 
 # --- SQLite storage functions ---
-@contextmanager
-def get_db_connection(db_path="collected_messages.db", max_attempts=3):
+@contextmanager # for proper closing of sqlite connection
+def get_db_connection(db_path, max_attempts=3):
     """Context manager for database connections with retry logic"""
     attempt = 0
     while attempt < max_attempts:
@@ -291,9 +288,9 @@ def get_db_connection(db_path="collected_messages.db", max_attempts=3):
                 pass
 
 def create_sqlite_db(db_path="collected_messages.db"):
-    """Connects to (or creates) the SQLite database and ensures the table exists."""
     with get_db_connection(db_path) as conn:
         c = conn.cursor()
+        # Existing messages table
         c.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
@@ -307,11 +304,35 @@ def create_sqlite_db(db_path="collected_messages.db"):
                 embeddings TEXT
             )
         ''')
+        # New channels table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_name TEXT PRIMARY KEY,
+                last_id TEXT,
+                stance TEXT,
+                status TEXT DEFAULT 'Active',
+                last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        # Execution_logs table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS execution_logs (
+                id TEXT PRIMARY KEY,
+                execution_date TIMESTAMP,
+                parsed_channels_count INTEGER,
+                parsed_channels TEXT,
+                missed_channels_count INTEGER,
+                missed_channels TEXT,
+                new_channels_count INTEGER,
+                new_channels TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         conn.commit()
 
-def store_in_sqlite(messages, db_path="collected_messages.db"):
+def store_in_sqlite(messages):
     """Stores a list of processed messages in the SQLite database."""
-    with get_db_connection(db_path) as conn:
+    with get_db_connection(MESSAGES_DB) as conn:
         c = conn.cursor()
         to_insert = []
         for msg in messages:
@@ -343,27 +364,42 @@ def store_in_sqlite(messages, db_path="collected_messages.db"):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', to_insert)
             conn.commit()
-            print(f"Stored {len(to_insert)} messages in SQLite database at {db_path}")
+            print(f"Stored {len(to_insert)} messages in SQLite database at {MESSAGES_DB}")
         except Exception as e:
             print("Error storing messages in SQLite:", str(e))
             raise
 
+def get_active_channels():
+    """Retrieve active channels from SQLite."""
+    with get_db_connection(CHANNELS_DB) as conn:
+        c = conn.cursor()
+        c.execute("SELECT channel_name, last_id, stance FROM channels WHERE status = 'Active'")
+        return c.fetchall()
+
+def update_channel_last_id(channel, last_id):
+    """Update the last_id for a channel in SQLite."""
+    with get_db_connection(CHANNELS_DB) as conn:
+        c = conn.cursor()
+        c.execute("""
+            UPDATE channels 
+            SET last_id = ?, last_sync = CURRENT_TIMESTAMP 
+            WHERE channel_name = ?
+        """, (str(last_id), channel))
+        conn.commit()
+
 async def main():
     try:
-        start_date = datetime.now(timezone.utc) - timedelta(days=4)
+        start_date = datetime.now(timezone.utc) - timedelta(days=int(os.getenv('DAYS_TO_PARSE', 2)))
         logger.info(f"Starting main execution with start date: {start_date}")
         
         parsed_channels = []
         missed_channels = []
         new_channels = []
 
-        records = table.all()
-        df_channels = [record['fields'] for record in records]
-        df_channels = [record for record in df_channels if record['status'] == 'Active']
-
-        channels = [(record['channel_name'], record['last_id'], record['stance']) for record in df_channels]
+        # Get channels from SQLite
+        channels = get_active_channels()
         random.shuffle(channels)
-        total_channels = len(channels)  # <-- Added line
+        total_channels = len(channels)
 
         logger.info(f"Processing {len(channels)} channels: {channels}")
         print(f"Channels to parse: {len(channels)}: {channels}")
@@ -385,7 +421,8 @@ async def main():
                 if messages_with_embeddings:
                     upsert_to_pinecone(messages_with_embeddings, pine_index)
                     new_last_id = max(msg['id'] for msg in messages_with_embeddings)
-                    update_airtable_last_id(table, channel, new_last_id)
+                    # Update only SQLite
+                    update_channel_last_id(channel, new_last_id)
                     parsed_channels.append(channel)
                     if not last_id:
                         new_channels.append(channel)
@@ -401,8 +438,9 @@ async def main():
                 import traceback
                 print(f"Traceback: {traceback.format_exc()}")
                 missed_channels.append(channel)
-
-        log_summary_to_airtable(parsed_channels, missed_channels, new_channels)
+        
+        # With this:
+        log_summary_to_db(parsed_channels, missed_channels, new_channels)
     finally:
         # Cleanup connections
         try:
@@ -432,10 +470,10 @@ async def async_handler(event, context):
             'body': f'Error updating Pinecone database: {str(e)}'
         }
     finally:
-        print('end pinecone update lambda')
+        print('end pinecone update')
 
-def lambda_handler(event, context):
-    return asyncio.get_event_loop().run_until_complete(async_handler(event, context))
+# def lambda_handler(event, context):
+#     return asyncio.get_event_loop().run_until_complete(async_handler(event, context))
 
 if __name__ == "__main__":
     logger.info("Starting local execution...")

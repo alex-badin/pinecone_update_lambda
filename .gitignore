@@ -23,10 +23,10 @@ build/
 *.csv
 *.sqlite
 *.db
-pinecone_results.txt
 
 # IDE specific files
 .idea/
 .vscode/
 *.swp
 .DS_Store
+temp/
