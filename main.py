@@ -287,24 +287,11 @@ def get_db_connection(db_path, max_attempts=3):
             except:
                 pass
 
-def create_sqlite_db(db_path="collected_messages.db"):
-    with get_db_connection(db_path) as conn:
+def create_channels_db():
+    """Creates the channels and execution_logs tables in the channels database."""
+    with get_db_connection(CHANNELS_DB) as conn:
         c = conn.cursor()
-        # Existing messages table
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS messages (
-                id TEXT PRIMARY KEY,
-                channel TEXT,
-                stance TEXT,
-                raw_message TEXT,
-                cleaned_message TEXT,
-                summary TEXT,
-                date TEXT,
-                views INTEGER,
-                embeddings TEXT
-            )
-        ''')
-        # New channels table
+        # Channels table
         c.execute('''
             CREATE TABLE IF NOT EXISTS channels (
                 channel_name TEXT PRIMARY KEY,
@@ -326,6 +313,26 @@ def create_sqlite_db(db_path="collected_messages.db"):
                 new_channels_count INTEGER,
                 new_channels TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+
+def create_messages_db():
+    """Creates the messages table in the messages database."""
+    with get_db_connection(MESSAGES_DB) as conn:
+        c = conn.cursor()
+        # Messages table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                channel TEXT,
+                stance TEXT,
+                raw_message TEXT,
+                cleaned_message TEXT,
+                summary TEXT,
+                date TEXT,
+                views INTEGER,
+                embeddings TEXT
             )
         ''')
         conn.commit()
@@ -390,6 +397,10 @@ def update_channel_last_id(channel, last_id):
 
 async def main():
     try:
+        # Ensure databases exist with the correct tables
+        create_channels_db()
+        create_messages_db()
+        
         start_date = datetime.now(timezone.utc) - timedelta(days=int(os.getenv('DAYS_TO_PARSE', 2)))
         logger.info(f"Starting main execution with start date: {start_date}")
         
