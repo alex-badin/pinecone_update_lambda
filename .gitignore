@@ -26,6 +26,7 @@ logs/
 *.csv
 *.sqlite
 *.db
+crash_log.txt
 
 # IDE specific files
 .idea/
