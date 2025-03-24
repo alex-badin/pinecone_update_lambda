@@ -12,6 +12,8 @@ venv/
 .env/
 .venv/
 ENV/
+._*
+.cache
 
 # Distribution / packaging
 dist/
@@ -19,6 +21,7 @@ build/
 *.egg-info/
 
 # Logs and databases
+logs/
 *.log
 *.csv
 *.sqlite
