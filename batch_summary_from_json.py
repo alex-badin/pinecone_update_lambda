@@ -69,15 +69,17 @@ def save_batch_to_db(message_ids, sources, messages, summaries_with_digest):
     conn.close()
 
 def import_json_files():
-    """Import messages from JSON files in the data_historic folder"""
+    """Import messages from JSON and pickle files in the data_historic folder"""
     data_dir = os.path.join('data_historic')
     json_files = glob.glob(os.path.join(data_dir, '*.json'))
+    pickle_files = glob.glob(os.path.join(data_dir, '*.pkl'))
+    all_files = json_files + pickle_files
     
-    if not json_files:
-        print(f"No JSON files found in {data_dir}")
+    if not all_files:
+        print(f"No JSON or pickle files found in {data_dir}")
         return 0
     
-    print(f"Found {len(json_files)} JSON files to process")
+    print(f"Found {len(all_files)} files to process ({len(json_files)} JSON, {len(pickle_files)} pickle)")
     
     conn = sqlite3.connect(results_db_path)
     cursor = conn.cursor()
@@ -85,15 +87,21 @@ def import_json_files():
     total_imported = 0
     total_skipped = 0
     
-    for json_file in tqdm(json_files, desc="Importing JSON files"):
+    for file_path in tqdm(all_files, desc="Importing files"):
         try:
-            with open(json_file, 'r') as file:
-                data = json.load(file)
+            # Load data based on file extension
+            if file_path.endswith('.json'):
+                with open(file_path, 'r') as file:
+                    data = json.load(file)
+            elif file_path.endswith('.pkl'):
+                import pickle
+                with open(file_path, 'rb') as file:
+                    data = pickle.load(file)
             
             file_imported = 0
             file_skipped = 0
             
-            # Process each source and its messages in the JSON file
+            # Process each source and its messages in the file
             for source, messages in data.items():
                 # Add a progress bar for each source's messages
                 for item in tqdm(messages, desc=f"Processing {source}", leave=False):
@@ -125,10 +133,10 @@ def import_json_files():
             conn.commit()
             total_imported += file_imported
             total_skipped += file_skipped
-            print(f"Processed {json_file}: imported {file_imported}, skipped {file_skipped}")
+            print(f"Processed {file_path}: imported {file_imported}, skipped {file_skipped}")
             
         except Exception as e:
-            print(f"Error processing {json_file}: {str(e)}")
+            print(f"Error processing {file_path}: {str(e)}")
     
     conn.close()
     print(f"Total messages imported: {total_imported}")
