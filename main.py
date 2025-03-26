@@ -74,7 +74,6 @@ from tenacity import (
     stop_after_attempt,
     wait_random_exponential,
 )  # for exponential backoff
-from tqdm import tqdm  # Import tqdm for progress bars
 
 from src.summarizer import Summarizer
 
@@ -139,26 +138,31 @@ async def get_new_messages(channel, last_id, start_date, channel_index, total_ch
     async with TelegramClient(StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH,
                               system_version="4.16.30-vxCUSTOM") as client:
         data = []
-        
-        # Check if we should ignore last_id based on environment variable
-        ignore_last_id = os.getenv('IGNORE_LAST_ID', 'False').lower() in ('true', '1', 't', 'yes')
-        
         try:
-            # If IGNORE_LAST_ID is True, always start from the beginning (offset_id = 0)
-            if ignore_last_id:
-                offset_id = 0
-                logger.info(f"IGNORE_LAST_ID is set to True, ignoring last_id and starting from the beginning")
-            else:
-                offset_id = int(last_id) if last_id else 0
+            offset_id = int(last_id) if last_id else 0
         except ValueError:
             offset_id = 0
         
         start_date = start_date.replace(tzinfo=timezone.utc) # Ensure timezone-aware
         logger.info(f"Parsing channel (#{channel_index} of {total_channels}): {channel}, start date: {start_date}, last id: {last_id}, offset_id: {offset_id}")
+        
+        # Add progress tracking
+        message_count = 0
+        last_log_time = time.time()
+        log_interval = 30  # Log progress every 30 seconds
+        
         async for message in client.iter_messages(channel, reverse=True, offset_id=offset_id):
-            if message.date < start_date: #for new channels with no last_id - not earlier than 4 days ago
+            if message.date < start_date: # for new channels with no last_id or if IGNORE_LAST_ID=True
                 continue
             data.append(message.to_dict())
+            
+            # Update progress counter and log periodically
+            message_count += 1
+            current_time = time.time()
+            if current_time - last_log_time > log_interval:
+                logger.info(f"Channel {channel}: Downloaded {message_count} messages so far...")
+                last_log_time = current_time
+                
     logger.info(f"Channel: {channel}, number of new messages: {len(data)}")
     return data
 
@@ -185,71 +189,28 @@ def clean_text(text):
     text = text.replace(name1, '')
     return text
 
-# Update the process_new_messages function to use batch processing
-# Update the process_new_messages function to store is_digest
-async def process_new_messages(messages, channel, stance):
+def process_new_messages(messages, channel, stance):
     processed_messages = []
     empty_message_count = 0
-    
-    # Create a progress bar for message processing
-    total_messages = len(messages)
-    logger.info(f"Processing {total_messages} messages from channel: {channel}")
-    
-    # Extract texts for batch processing
-    texts_to_summarize = []
-    valid_messages = []
-    
     for message in messages:
         if 'message' not in message:
             empty_message_count += 1
             continue
         cleaned_message = clean_text(message['message'])
         if len(cleaned_message) > 30:
-            texts_to_summarize.append(cleaned_message)
-            valid_messages.append({
+            summary, _ = summarizer.summarize(cleaned_message, max_summary_length=500, length_threshold=750)
+            processed_messages.append({
                 'id': message['id'],
                 'channel': channel,
                 'stance': stance,
                 'raw_message': message,  # Save full raw data
                 'cleaned_message': cleaned_message,
+                'summary': summary,
                 'date': message['date'],
                 'views': message.get('views', 0)
             })
-    
-    # Batch summarize all texts
-    if texts_to_summarize:
-        # Calculate the number of batches
-        batch_size = summarizer.batch_size
-        num_batches = (len(texts_to_summarize) + batch_size - 1) // batch_size
-        
-        # Add rate limiting - ensure we don't exceed Gemini's 2000 RPM limit
-        # Assuming each batch has batch_size requests, calculate max batches per minute
-        max_batches_per_minute = 2000 // batch_size
-        # Add a safety margin
-        safe_batches_per_minute = max(1, int(max_batches_per_minute * 0.8))
-        # Calculate delay between batches in seconds
-        batch_delay = 60 / safe_batches_per_minute if safe_batches_per_minute > 0 else 0
-        
-        logger.info(f"Rate limiting: Processing max {safe_batches_per_minute} batches/minute with {batch_delay:.2f}s delay between batches")
-        
-        with tqdm(total=num_batches, desc=f"Summarizing {channel}", unit="batch") as pbar:
-            # Pass the progress bar to the summarize_batch method
-            summaries = await summarizer.summarize_batch(
-                texts_to_summarize, 
-                progress_callback=pbar.update,
-                batch_delay=batch_delay  # Pass the delay to the summarize_batch method
-            )
-        
-        # Add summaries to processed messages
-        for msg, (summary, is_digest) in zip(valid_messages, summaries):
-            msg['summary'] = summary
-            msg['is_digest'] = is_digest  # Store the is_digest flag
-            processed_messages.append(msg)
-    
     if empty_message_count > 0:
         logger.warning(f"Number of empty messages skipped for channel {channel}: {empty_message_count}")
-    
-    logger.info(f"Successfully processed {len(processed_messages)} of {total_messages} messages from {channel}")
     return processed_messages
 
 @retry(stop=stop_after_attempt(3), wait=wait_random_exponential(min=1, max=60))
@@ -263,12 +224,7 @@ def get_embeddings(messages, text_col='cleaned_message', model="embed-multilingu
         logger.warning(f"No '{text_col}' found in messages. Available keys: {messages[0].keys() if messages else 'No messages'}")  
         return messages
     try:
-        logger.info(f"Getting embeddings for {len(texts)} texts")
-        # Add progress bar for embedding generation
-        with tqdm(total=1, desc="Generating embeddings", unit="batch") as pbar:
-            embeddings = get_embeddings_with_retry(texts, model)
-            pbar.update(1)
-        
+        embeddings = get_embeddings_with_retry(texts, model)
         for msg, embedding in zip(messages, embeddings):
             msg['embeddings'] = embedding
     except Exception as e:
@@ -276,7 +232,6 @@ def get_embeddings(messages, text_col='cleaned_message', model="embed-multilingu
         return messages
     return messages
 
-# Update the upsert_to_pinecone function to include is_digest in metadata
 def upsert_to_pinecone(messages, index, batch_size=100):
     vectors = []
     for msg in messages:
@@ -289,20 +244,15 @@ def upsert_to_pinecone(messages, index, batch_size=100):
                 'stance': msg['stance'],
                 'channel': msg['channel'],
                 'date': int(time.mktime(msg['date'].timetuple())),
-                'views': msg['views'],
-                'is_digest': msg.get('is_digest', False)  # Include is_digest in metadata
+                'views': msg['views']
             }
         }
         vectors.append(vector)
     
-    total_batches = (len(vectors) + batch_size - 1) // batch_size  # Calculate total number of batches
-    with tqdm(total=total_batches, desc="Upserting to Pinecone", unit="batch") as pbar:
-        for i in range(0, len(vectors), batch_size):
-            batch = vectors[i:i+batch_size]
-            index.upsert(vectors=batch)
-            pbar.update(1)
-    
-    logger.info(f"Upserted {len(vectors)} records to Pinecone. Last id: {vectors[-1]['id'] if vectors else 'No vectors'}")
+    for i in range(0, len(vectors), batch_size):
+        batch = vectors[i:i+batch_size]
+        index.upsert(vectors=batch)
+    logger.info(f"Upserted {len(vectors)} records to Pinecone. Last id: {vectors[-1]['id']}")
 
 def log_summary_to_db(parsed_channels, missed_channels, new_channels):
     execution_date = datetime.now()
@@ -396,20 +346,16 @@ def create_messages_db():
                 summary TEXT,
                 date TEXT,
                 views INTEGER,
-                embeddings TEXT,
-                is_digest BOOLEAN DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                embeddings TEXT
             )
         ''')
         conn.commit()
 
-# Update the store_in_sqlite function to include is_digest
 def store_in_sqlite(messages):
     """Stores a list of processed messages in the SQLite database."""
     with get_db_connection(MESSAGES_DB) as conn:
         c = conn.cursor()
         to_insert = []
-        current_timestamp = datetime.now().isoformat()
         for msg in messages:
             # Create a unique key combining channel and message ID
             pk = f"{msg['channel']}_{msg['id']}"
@@ -421,10 +367,6 @@ def store_in_sqlite(messages):
                 date_str = msg['date']
             else:
                 date_str = msg['date'].isoformat() if hasattr(msg['date'], 'isoformat') else str(msg['date'])
-            
-            # Get is_digest value (default to 0 if not present)
-            is_digest = 1 if msg.get('is_digest', False) else 0
-            
             to_insert.append((
                 pk,
                 msg['channel'],
@@ -434,15 +376,13 @@ def store_in_sqlite(messages):
                 msg['summary'],
                 date_str,
                 msg.get('views', 0),
-                embeddings_json,
-                is_digest,
-                current_timestamp  # Add current timestamp for created_at
+                embeddings_json
             ))
         try:
             c.executemany('''
                 INSERT OR REPLACE INTO messages
-                (id, channel, stance, raw_message, cleaned_message, summary, date, views, embeddings, is_digest, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, channel, stance, raw_message, cleaned_message, summary, date, views, embeddings)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', to_insert)
             conn.commit()
             logger.info(f"Stored {len(to_insert)} messages in SQLite database at {MESSAGES_DB}")
@@ -475,19 +415,8 @@ async def main():
         create_channels_db()
         create_messages_db()
         
-        # Get DAYS_TO_PARSE from environment variable, default to 2 if not set
         start_date = datetime.now(timezone.utc) - timedelta(days=int(os.getenv('DAYS_TO_PARSE', 2)))
         logger.info(f"Starting main execution with start date: {start_date}")
-        
-        # Log if we're ignoring last_id values
-        ignore_last_id = os.getenv('IGNORE_LAST_ID', 'False').lower() in ('true', '1', 't', 'yes')
-        if ignore_last_id:
-            logger.info("IGNORE_LAST_ID is set to True - will collect messages from the beginning regardless of last_id values")
-        
-        # Check if we should skip upserting to Pinecone
-        skip_pinecone = os.getenv('SKIP_PINECONE', 'False').lower() in ('true', '1', 't', 'yes')
-        if skip_pinecone:
-            logger.info("SKIP_PINECONE is set to True - will only store data locally without upserting to Pinecone")
         
         parsed_channels = []
         missed_channels = []
@@ -500,12 +429,6 @@ async def main():
 
         logger.info(f"Processing {len(channels)} channels: {channels}")
 
-        # Initialize your summarizer with batch size from environment variable
-        batch_size = int(os.getenv('SUMMARIZER_BATCH_SIZE', '5'))
-        cache_db = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'summary_cache.db')
-        global summarizer
-        summarizer = Summarizer(GEMINI_API_KEY, cache_db=cache_db, batch_size=batch_size)
-
         for index, (channel, last_id, stance) in enumerate(channels, 1):
             try:
                 messages = await get_new_messages(channel, last_id, start_date, index, total_channels)
@@ -513,7 +436,7 @@ async def main():
                     logger.info(f"No new messages for channel: {channel}")
                     continue
 
-                processed_messages = await process_new_messages(messages, channel, stance)
+                processed_messages = process_new_messages(messages, channel, stance)
                 if not processed_messages:
                     logger.warning(f"No processed messages for channel: {channel}")
                     continue
@@ -521,12 +444,7 @@ async def main():
                 messages_with_embeddings = get_embeddings(processed_messages, text_col='cleaned_message', model="embed-multilingual-v3.0")
 
                 if messages_with_embeddings:
-                    # Only upsert to Pinecone if not skipping
-                    if not skip_pinecone:
-                        upsert_to_pinecone(messages_with_embeddings, pine_index)
-                    else:
-                        logger.info(f"Skipping Pinecone upsert for {len(messages_with_embeddings)} messages from {channel}")
-                    
+                    upsert_to_pinecone(messages_with_embeddings, pine_index)
                     new_last_id = max(msg['id'] for msg in messages_with_embeddings)
                     # Update only SQLite
                     update_channel_last_id(channel, new_last_id)

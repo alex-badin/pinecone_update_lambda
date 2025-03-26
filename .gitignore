@@ -27,6 +27,7 @@ logs/
 *.sqlite
 *.db
 crash_log.txt
+*.json
 
 # IDE specific files
 .idea/

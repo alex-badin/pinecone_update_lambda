@@ -28,7 +28,8 @@ class Summarizer:
         self.model = genai.GenerativeModel('gemini-2.0-flash')
         self.cache_db = cache_db
         self.batch_size = batch_size
-        self._init_cache()
+        if self.cache_db:  # Only initialize cache if cache_db is provided
+            self._init_cache()
         
     def _init_cache(self):
         """Initialize the cache database"""
@@ -51,6 +52,9 @@ class Summarizer:
     
     def _get_from_cache(self, text: str) -> Optional[Tuple[str, bool]]:
         """Try to get a summary from cache"""
+        if not self.cache_db:  # Skip if caching is disabled
+            return None
+            
         text_hash = hashlib.md5(text.encode()).hexdigest()
         try:
             conn = sqlite3.connect(self.cache_db)
@@ -68,6 +72,9 @@ class Summarizer:
     
     def _save_to_cache(self, text: str, summary: str, is_digest: bool):
         """Save a summary to cache"""
+        if not self.cache_db:  # Skip if caching is disabled
+            return
+            
         text_hash = hashlib.md5(text.encode()).hexdigest()
         try:
             conn = sqlite3.connect(self.cache_db)
@@ -195,7 +202,7 @@ class Summarizer:
         Checks cache first before making API call.
         """
         try:
-            # Check cache first
+            # Check cache first (if enabled)
             cached_result = self._get_from_cache(text)
             if cached_result:
                 logger.debug("Cache hit for text")
@@ -216,7 +223,7 @@ class Summarizer:
                 summary = response.text.replace('SUMMARY:', '').strip()
                 is_digest = False
             
-            # Save to cache
+            # Save to cache (if enabled)
             self._save_to_cache(text, summary, is_digest)
             return summary, is_digest
 
@@ -248,11 +255,11 @@ class Summarizer:
         to_process = []
         to_process_indices = []
         
-        # First check cache for all texts
+        # First check cache for all texts (if caching is enabled)
         for i, text in enumerate(texts):
             cached_result = self._get_from_cache(text)
             if cached_result:
-                # Insert None as placeholder to maintain order
+                # Insert cached result
                 results.append(cached_result)
             else:
                 # Need to process this text
