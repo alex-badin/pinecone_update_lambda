@@ -22,6 +22,7 @@ build/
 
 # Logs and databases
 logs/
+data_historic/
 *.log
 *.csv
 *.sqlite

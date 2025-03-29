@@ -69,17 +69,20 @@ def save_batch_to_db(message_ids, sources, messages, summaries_with_digest):
     conn.close()
 
 def import_json_files():
-    """Import messages from JSON and pickle files in the data_historic folder"""
+    """Import messages from JSON, pickle, and .p files in the data_historic folder"""
     data_dir = os.path.join('data_historic')
     json_files = glob.glob(os.path.join(data_dir, '*.json'))
     pickle_files = glob.glob(os.path.join(data_dir, '*.pkl'))
-    all_files = json_files + pickle_files
+    p_files = glob.glob(os.path.join(data_dir, '*.[pP]'))  # modified pattern for case-insensitivity
+    all_files = json_files + pickle_files + p_files  # Combine all file types
     
+    print("DEBUG: Found files:", all_files)  # Debug print
+
     if not all_files:
-        print(f"No JSON or pickle files found in {data_dir}")
+        print(f"No JSON, pickle, or .p files found in {data_dir}")
         return 0
     
-    print(f"Found {len(all_files)} files to process ({len(json_files)} JSON, {len(pickle_files)} pickle)")
+    print(f"Found {len(all_files)} files to process ({len(json_files)} JSON, {len(pickle_files)} pickle, {len(p_files)} .p)")
     
     conn = sqlite3.connect(results_db_path)
     cursor = conn.cursor()
@@ -93,7 +96,7 @@ def import_json_files():
             if file_path.endswith('.json'):
                 with open(file_path, 'r') as file:
                     data = json.load(file)
-            elif file_path.endswith('.pkl'):
+            elif file_path.endswith('.pkl') or file_path.endswith('.p'):  # Handle both .pkl and .p
                 import pickle
                 with open(file_path, 'rb') as file:
                     data = pickle.load(file)
@@ -152,7 +155,7 @@ async def summarize_messages():
 
     # Initialize the summarizer with relative path
     cache_db_path = os.path.join('temp', 'summary_cache.db')
-    summarizer = Summarizer(api_key=api_key, cache_db=cache_db_path, batch_size=100)
+    summarizer = Summarizer(api_key=api_key, cache_db=cache_db_path, batch_size=200)
     
     # Get messages that need summarization
     conn = sqlite3.connect(results_db_path)
