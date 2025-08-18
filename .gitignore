@@ -1,5 +1,6 @@
 # Environment variables
 .env
+*.bat
 
 # Python
 __pycache__/
@@ -15,14 +16,11 @@ ENV/
 ._*
 .cache
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
 
 # Logs and databases
 logs/
 data_historic/
+**/old/
 *.log
 *.csv
 *.sqlite
