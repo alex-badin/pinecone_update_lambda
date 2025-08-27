@@ -19,6 +19,37 @@ from contextlib import contextmanager
 CHANNELS_DB = "channels.db"
 MESSAGES_DB = "collected_messages.db"
 
+# Step 5: Connection pool for better connection reuse
+_db_connections = {}
+
+def get_pooled_connection(db_path):
+    """Get or create a reusable connection for the database path"""
+    if db_path not in _db_connections:
+        conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
+        
+        # Apply performance pragmas
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA cache_size=10000")
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        cursor.execute("PRAGMA mmap_size=268435456")  # 256MB
+        
+        _db_connections[db_path] = conn
+        logger.info(f"Created new pooled connection for {db_path}")
+    
+    return _db_connections[db_path]
+
+def close_all_connections():
+    """Close all pooled connections"""
+    for db_path, conn in _db_connections.items():
+        try:
+            conn.close()
+            logger.info(f"Closed connection for {db_path}")
+        except:
+            pass
+    _db_connections.clear()
+
 # Set up logging configuration
 try:
     print('Setting up logging...')
@@ -282,11 +313,20 @@ def log_summary_to_db(parsed_channels, missed_channels, new_channels):
 # --- SQLite storage functions ---
 @contextmanager # for proper closing of sqlite connection
 def get_db_connection(db_path, max_attempts=3):
-    """Context manager for database connections with retry logic"""
+    """Context manager for database connections with retry logic and performance optimization"""
     attempt = 0
     while attempt < max_attempts:
         try:
-            conn = sqlite3.connect(db_path, timeout=20.0)  # Add timeout parameter
+            conn = sqlite3.connect(db_path, timeout=30.0)  # Increased timeout
+            
+            # Step 2: Enable WAL mode and performance pragmas
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA cache_size=10000")
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute("PRAGMA mmap_size=268435456")  # 256MB
+            
             yield conn
             return
         except sqlite3.OperationalError as e:
@@ -294,7 +334,7 @@ def get_db_connection(db_path, max_attempts=3):
             if attempt == max_attempts:
                 raise
             logger.warning(f"Database locked, retrying... (attempt {attempt}/{max_attempts})")
-            time.sleep(1)  # Wait before retrying
+            time.sleep(2)  # Increased wait time
         finally:
             try:
                 conn.close()
@@ -332,7 +372,7 @@ def create_channels_db():
         conn.commit()
 
 def create_messages_db():
-    """Creates the messages table in the messages database."""
+    """Creates the messages table in the messages database with performance indexes."""
     with get_db_connection(MESSAGES_DB) as conn:
         c = conn.cursor()
         # Messages table
@@ -349,14 +389,39 @@ def create_messages_db():
                 embeddings TEXT
             )
         ''')
+        
+        # Create indexes for better query performance (Step 1)
+        c.execute('CREATE INDEX IF NOT EXISTS idx_channel ON messages(channel)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_date ON messages(date)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_channel_date ON messages(channel, date)')
+        
         conn.commit()
 
 def store_in_sqlite(messages):
-    """Stores a list of processed messages in the SQLite database."""
-    with get_db_connection(MESSAGES_DB) as conn:
-        c = conn.cursor()
+    """Stores a list of processed messages in the SQLite database with optimized insertions."""
+    if not messages:
+        return
+        
+    # Step 5: Use pooled connection for better performance
+    conn = get_pooled_connection(MESSAGES_DB)
+    c = conn.cursor()
+    
+    try:
+        # Step 3: Check for existing messages to avoid duplicates (faster than INSERT OR REPLACE)
+        message_ids = [f"{msg['channel']}_{msg['id']}" for msg in messages]
+        placeholders = ','.join('?' * len(message_ids))
+        c.execute(f"SELECT id FROM messages WHERE id IN ({placeholders})", message_ids)
+        existing_ids = {row[0] for row in c.fetchall()}
+        
+        # Filter out existing messages
+        new_messages = [msg for msg in messages if f"{msg['channel']}_{msg['id']}" not in existing_ids]
+        
+        if not new_messages:
+            logger.info("No new messages to store (all already exist)")
+            return
+        
         to_insert = []
-        for msg in messages:
+        for msg in new_messages:
             # Create a unique key combining channel and message ID
             pk = f"{msg['channel']}_{msg['id']}"
             # Convert raw_message and embeddings to JSON strings for storage
@@ -378,36 +443,40 @@ def store_in_sqlite(messages):
                 msg.get('views', 0),
                 embeddings_json
             ))
-        try:
-            c.executemany('''
-                INSERT OR REPLACE INTO messages
-                (id, channel, stance, raw_message, cleaned_message, summary, date, views, embeddings)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', to_insert)
-            conn.commit()
-            logger.info(f"Stored {len(to_insert)} messages in SQLite database at {MESSAGES_DB}")
-        except Exception as e:
-            logger.error(f"Error storing messages in SQLite: {str(e)}")
-            raise
+        
+        # Step 3: Use regular INSERT (much faster than INSERT OR REPLACE)
+        c.executemany('''
+            INSERT INTO messages
+            (id, channel, stance, raw_message, cleaned_message, summary, date, views, embeddings)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', to_insert)
+        conn.commit()
+        logger.info(f"Stored {len(to_insert)} new messages in SQLite database at {MESSAGES_DB} (skipped {len(existing_ids)} existing)")
+    except Exception as e:
+        logger.error(f"Error storing messages in SQLite: {str(e)}")
+        conn.rollback()
+        raise
 
 def get_active_channels():
     """Retrieve active channels from SQLite."""
     logger.info("Retrieving active channels from SQLite...")
-    with get_db_connection(CHANNELS_DB) as conn:
-        c = conn.cursor()
-        c.execute("SELECT channel_name, last_id, stance FROM channels WHERE status = 'Active'")
-        return c.fetchall()
+    # Step 5: Use pooled connection
+    conn = get_pooled_connection(CHANNELS_DB)
+    c = conn.cursor()
+    c.execute("SELECT channel_name, last_id, stance FROM channels WHERE status = 'Active'")
+    return c.fetchall()
 
 def update_channel_last_id(channel, last_id):
     """Update the last_id for a channel in SQLite."""
-    with get_db_connection(CHANNELS_DB) as conn:
-        c = conn.cursor()
-        c.execute("""
-            UPDATE channels 
-            SET last_id = ?, last_sync = CURRENT_TIMESTAMP 
-            WHERE channel_name = ?
-        """, (str(last_id), channel))
-        conn.commit()
+    # Step 5: Use pooled connection
+    conn = get_pooled_connection(CHANNELS_DB)
+    c = conn.cursor()
+    c.execute("""
+        UPDATE channels 
+        SET last_id = ?, last_sync = CURRENT_TIMESTAMP 
+        WHERE channel_name = ?
+    """, (str(last_id), channel))
+    conn.commit()
 
 async def main():
     try:
@@ -429,6 +498,10 @@ async def main():
 
         logger.info(f"Processing {len(channels)} channels: {channels}")
 
+        # Step 4: Collect messages in larger batches for more efficient database operations
+        all_messages_batch = []
+        batch_size = int(os.getenv('DB_BATCH_SIZE', 1000))  # Configurable batch size
+        
         for index, (channel, last_id, stance) in enumerate(channels, 1):
             try:
                 messages = await get_new_messages(channel, last_id, start_date, index, total_channels)
@@ -453,8 +526,14 @@ async def main():
                         new_channels.append(channel)
                     logger.info(f"Successfully processed channel: {channel}")
 
-                    # Incrementally store the collected messages in the SQLite database
-                    store_in_sqlite(messages_with_embeddings)
+                    # Step 4: Add to batch instead of immediate storage
+                    all_messages_batch.extend(messages_with_embeddings)
+                    
+                    # Store batch when it reaches the configured size
+                    if len(all_messages_batch) >= batch_size:
+                        store_in_sqlite(all_messages_batch)
+                        all_messages_batch = []  # Clear the batch
+                        
                 else:
                     logger.warning(f"No messages with embeddings for channel: {channel}")
 
@@ -464,17 +543,19 @@ async def main():
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 missed_channels.append(channel)
         
-        # With this:
+        # Step 4: Store any remaining messages in the final batch
+        if all_messages_batch:
+            store_in_sqlite(all_messages_batch)
+        
+        # Log execution summary
         log_summary_to_db(parsed_channels, missed_channels, new_channels)
     finally:
+        # Step 5: Close all pooled database connections
+        close_all_connections()
+        
         # Cleanup connections
         try:
             co.close()  # Close Cohere client if it has a close method
-        except:
-            pass
-        
-        try:
-            pc.close()  # Close Pinecone client if it has a close method
         except:
             pass
         
