@@ -3,7 +3,6 @@ print('start pinecone update')
 import os
 import sys
 import traceback
-from dotenv import load_dotenv
 import asyncio
 import random
 import json
@@ -15,9 +14,15 @@ import logging
 from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
 
-# At the top of the file with other constants
-CHANNELS_DB = "channels.db"
-MESSAGES_DB = "collected_messages.db"
+# Import our configuration module
+from config import setup_environment
+
+# Initialize configuration
+config, secrets = setup_environment()
+
+# Set database paths based on environment
+CHANNELS_DB = config.get_db_path("channels.db")
+MESSAGES_DB = config.get_db_path("collected_messages.db")
 
 # Step 5: Connection pool for better connection reuse
 _db_connections = {}
@@ -53,16 +58,15 @@ def close_all_connections():
 # Set up logging configuration
 try:
     print('Setting up logging...')
-    # Get absolute path for the log directory
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    log_directory = os.path.join(script_dir, 'logs')
+    # Get log directory from config
+    log_directory = config.get_log_path()
     os.makedirs(log_directory, exist_ok=True)
     log_file = os.path.join(log_directory, 'pinecone_update.log')
     
     # Add immediate file logging for debugging
     with open(os.path.join(log_directory, 'startup_debug.log'), 'a') as f:
         f.write(f'\n--- New execution at {datetime.now()} ---\n')
-        f.write(f'Script directory: {script_dir}\n')
+        f.write(f'Environment: {"AWS" if config.__class__.__name__ == "AWSConfig" else "LOCAL"}\n')
         f.write(f'Python executable: {sys.executable}\n')
         f.write(f'Working directory: {os.getcwd()}\n')
 
@@ -108,53 +112,13 @@ from tenacity import (
 
 from src.summarizer import Summarizer
 
-# Function to retrieve secrets (if AWS Secrets Manager is used)
-def get_secret(secret_name):
-    secrets_manager = boto3.client('secretsmanager', region_name=os.environ.get('AWS_REGION', 'eu-central-1'))
-    try:
-        get_secret_value_response = secrets_manager.get_secret_value(SecretId=secret_name)
-    except ClientError as e:
-        logger.error(f"Error retrieving secret {secret_name}: {str(e)}")
-        raise e
-    else:
-        if 'SecretString' in get_secret_value_response:
-            return json.loads(get_secret_value_response['SecretString'])
-        else:
-            return json.loads(get_secret_value_response['SecretBinary'])
-
-# Load environment variables
-# Modify the load_dotenv() call to use absolute path
-try:
-    # Get the directory where the script is located
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Construct absolute path to .env file
-    env_path = os.path.join(script_dir, '.env')
-    # Load environment variables with explicit path
-    load_dotenv(env_path)
-    
-    TG_API_ID = os.getenv('TG_API_ID')
-    TG_API_HASH = os.getenv('TG_API_HASH')
-    TG_SESSION_STRING = os.getenv('TG_SESSION_STRING')
-    COHERE_KEY = os.getenv('COHERE_KEY')
-    PINE_KEY = os.getenv('PINE_KEY')
-    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-    
-    required_vars = {
-        "TG_API_ID": TG_API_ID,
-        "TG_API_HASH": TG_API_HASH,
-        "TG_SESSION_STRING": TG_SESSION_STRING,
-        "COHERE_KEY": COHERE_KEY,
-        "PINE_KEY": PINE_KEY,
-        "GEMINI_API_KEY": GEMINI_API_KEY,
-    }
-    missing = [var_name for var_name, value in required_vars.items() if not value]
-    if missing:
-        raise ValueError(f"Missing environment variables: {', '.join(missing)}")
-except Exception as e:
-    logger.error(f"Error retrieving secrets: {str(e)}")
-    raise
-
-# Environment variables for Pinecone
+# Get credentials from our configuration system
+TG_API_ID = int(os.environ['TG_API_ID'])
+TG_API_HASH = os.environ['TG_API_HASH']
+TG_SESSION_STRING = os.environ['TG_SESSION_STRING']
+COHERE_KEY = os.environ['COHERE_KEY']
+PINE_KEY = os.environ['PINE_KEY']
+GEMINI_API_KEY = os.environ['GEMINI_API_KEY']
 PINE_INDEX = os.environ['PINE_INDEX']
 
 # Initialize clients
@@ -162,8 +126,8 @@ co = cohere.Client(COHERE_KEY)
 pc = Pinecone(PINE_KEY)
 pine_index = pc.Index(PINE_INDEX)
 
-# Initialize your summarizer
-summarizer = Summarizer(GEMINI_API_KEY)
+# Initialize your summarizer with cache path based on environment
+summarizer = Summarizer(GEMINI_API_KEY, cache_db=config.get_cache_path())
 
 async def get_new_messages(channel, last_id, start_date, channel_index, total_channels):
     async with TelegramClient(StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH,

@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  pinecone-update:
+    build:
+      context: .
+      target: development
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./.env:/app/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - pinecone-network
+
+networks:
+  pinecone-network:
+    driver: bridge

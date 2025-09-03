@@ -1,6 +1,7 @@
 # Environment variables
 .env
-*.bat
+.env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -13,12 +14,18 @@ venv/
 .env/
 .venv/
 ENV/
+env.bak/
+venv.bak/
 ._*
 .cache
-
+*.egg-info/
+dist/
+build/
 
 # Logs and databases
 logs/
+data/
+!data/.gitkeep
 data_historic/
 **/old/
 *.log
@@ -26,11 +33,27 @@ data_historic/
 *.sqlite
 *.db
 crash_log.txt
-*.json
+
+# Temporary and generated files
+temp/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# AWS deployment generated files
+deployment/aws/task-definition-updated.json
+deployment/aws/.aws-sam/
 
 # IDE specific files
 .idea/
 .vscode/
 *.swp
 .DS_Store
-temp/
+
+# OS specific
+Thumbs.db
+.DS_Storevenv/

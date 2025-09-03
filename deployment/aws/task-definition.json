@@ -1,0 +1,61 @@
+{
+  "family": "pinecone-update",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["EC2"],
+  "cpu": "2048",
+  "memory": "4096",
+  "executionRoleArn": "arn:aws:iam::{ACCOUNT_ID}:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::{ACCOUNT_ID}:role/pinecone-update-task-role",
+  "containerDefinitions": [
+    {
+      "name": "pinecone-update",
+      "image": "{ACCOUNT_ID}.dkr.ecr.{REGION}.amazonaws.com/ask-media/pinecone-update:latest",
+      "memory": 4096,
+      "memoryReservation": 2048,
+      "essential": true,
+      "environment": [
+        {
+          "name": "AWS_REGION",
+          "value": "{REGION}"
+        },
+        {
+          "name": "DAYS_TO_PARSE",
+          "value": "2"
+        },
+        {
+          "name": "DB_BATCH_SIZE",
+          "value": "1000"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "ebs-storage",
+          "containerPath": "/data",
+          "readOnly": false
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/pinecone-update",
+          "awslogs-region": "{REGION}",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "ebs-storage",
+      "dockerVolumeConfiguration": {
+        "scope": "shared",
+        "autoprovision": false,
+        "driver": "local",
+        "driverOpts": {
+          "type": "ext4",
+          "device": "/dev/xvdf"
+        }
+      }
+    }
+  ]
+}
